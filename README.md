@@ -12,6 +12,7 @@
 - 🎥 **视频标记**自动标记微信视频位置（提示到原文观看）
 - 📁 **灵活输出**支持普通模式和 Obsidian 模式
 - 🛠️ **文件名清理**自动处理文件名中的非法字符
+- 🔒 **安全限制**仅请求公众号域名与微信 CDN 图片，输出目录限制在当前工作目录下，避免 SSRF 与任意路径写入
 - 🤖 **Claude Code 集成**无缝集成 Claude Code 工作流
 - 💎 **Obsidian 深度适配**专为 Obsidian 优化的图片引用格式
 
@@ -32,8 +33,8 @@ python scripts/wechat_article_to_md.py https://mp.weixin.qq.com/s/xxxxxx
 # Obsidian 模式（推荐）
 python scripts/wechat_article_to_md.py https://mp.weixin.qq.com/s/xxxxxx . -obsidian
 
-# 指定 Obsidian 的图片目录
-python scripts/wechat_article_to_md.py https://mp.weixin.qq.com/s/xxxxxx . -obsidian -img-dir /path/to/obsidian/vault/attachments/img
+# 指定 Obsidian 的图片目录（需在当前工作目录下）
+python scripts/wechat_article_to_md.py https://mp.weixin.qq.com/s/xxxxxx . -obsidian -img-dir ./attachments/img
 ```
 
 ## 💎 Obsidian 完美适配
@@ -78,6 +79,12 @@ python scripts/wechat_article_to_md.py https://mp.weixin.qq.com/s/xxxxxx . -obsi
 - 微信视频无法直接下载，脚本会在视频位置添加提示标记
 - 图片下载可能受网络环境影响
 - 部分微信文章可能有访问限制
+
+## 🔒 安全说明
+
+- **文章 URL**：仅接受 `https://mp.weixin.qq.com/...`，其他域名或 `file://` 等协议会被拒绝，防止 SSRF
+- **图片**：仅从白名单域名（如 `mmbiz.qpic.cn`、`res.wx.qq.com` 等）下载，非白名单图片会跳过
+- **输出路径**：`输出目录` 与 `-img-dir` 必须在**当前工作目录**下，且不能为系统目录（如 `/etc`、`/tmp` 等），防止误写系统文件
 
 ## 📄 许可证
 

@@ -6,6 +6,7 @@
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:
     import requests
@@ -26,6 +27,92 @@ def sanitize_filename(name):
     return name or 'article'
 
 
+# 公众号文章 URL 允许的域名
+ARTICLE_HOST = 'mp.weixin.qq.com'
+# 图片 CDN 白名单（微信公众号文章内常见图床）
+ALLOWED_IMAGE_HOSTS = frozenset({
+    'mmbiz.qpic.cn',
+    'mmbiz.qlogo.cn',
+    'res.wx.qq.com',
+    'wx.qlogo.cn',
+})
+
+
+def validate_url(url, for_article=True):
+    """校验 URL，防止 SSRF：文章仅允许 mp.weixin.qq.com，图片仅允许微信 CDN 白名单。
+
+    Args:
+        url: 待校验的 URL 字符串
+        for_article: True 表示文章 URL，False 表示图片 URL
+
+    Returns:
+        True 表示通过校验
+
+    Raises:
+        ValueError: 校验不通过时，消息描述原因
+    """
+    if not url or not url.strip():
+        raise ValueError('URL 为空')
+    parsed = urlparse(url.strip())
+    if for_article:
+        if parsed.scheme != 'https':
+            raise ValueError('文章 URL 必须为 https')
+        if (parsed.netloc or '').lower() != ARTICLE_HOST:
+            raise ValueError(f'文章 URL 仅允许域名: {ARTICLE_HOST}')
+        return True
+    # 图片 URL
+    if parsed.scheme and parsed.scheme.lower() not in ('http', 'https'):
+        raise ValueError('图片 URL 仅允许 http/https')
+    host = (parsed.netloc or '').lower()
+    if not host:
+        raise ValueError('图片 URL 缺少主机名')
+    if host not in ALLOWED_IMAGE_HOSTS:
+        raise ValueError(f'图片 URL 仅允许以下域名: {", ".join(sorted(ALLOWED_IMAGE_HOSTS))}')
+    return True
+
+
+# 禁止作为输出目录的系统路径前缀（防止写入系统关键目录）
+FORBIDDEN_OUTPUT_PREFIXES = [
+    Path(p).resolve() for p in (
+        '/etc', '/usr', '/bin', '/sbin', '/var', '/tmp',
+        '/System', '/Library', '/Applications',
+    )
+]
+
+
+def validate_output_path(dir_path, path_name='输出目录'):
+    """校验输出路径在当前工作目录下且不在系统目录，防止任意路径写入。
+
+    Args:
+        dir_path: 待校验的目录路径（字符串或 Path）
+        path_name: 用于错误提示的名称
+
+    Returns:
+        解析后的绝对 Path
+
+    Raises:
+        ValueError: 路径不在 CWD 下或在禁止的系统目录下
+    """
+    resolved = Path(dir_path).resolve()
+    cwd = Path.cwd().resolve()
+    try:
+        under_cwd = resolved == cwd or resolved.is_relative_to(cwd)
+    except (TypeError, ValueError):
+        under_cwd = False
+    if not under_cwd:
+        raise ValueError(f'{path_name} 必须在当前工作目录下: {resolved}')
+    def _path_under(path, prefix):
+        try:
+            return path == prefix or path.is_relative_to(prefix)
+        except ValueError:
+            return False
+
+    for forbidden in FORBIDDEN_OUTPUT_PREFIXES:
+        if _path_under(resolved, forbidden):
+            raise ValueError(f'{path_name} 不能为系统目录或其子目录: {forbidden}')
+    return resolved
+
+
 def download_image(url, img_dir, index, article_id=None):
     """下载图片到本地
 
@@ -35,6 +122,14 @@ def download_image(url, img_dir, index, article_id=None):
         index: 图片序号
         article_id: 文章唯一标识，用于生成唯一文件名
     """
+    try:
+        url = url.strip()
+        if url.startswith('//'):
+            url = 'https:' + url
+        validate_url(url, for_article=False)
+    except ValueError as e:
+        print(f"  跳过非法图片 URL ({url[:50]}...): {e}")
+        return None
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -301,11 +396,29 @@ def fetch_wechat_article(url, output_dir='.', download_images=True, obsidian_mod
         obsidian_mode: 是否使用 Obsidian 格式（图片引用格式 ![[filename]]）
         img_output_dir: 图片保存目录（绝对路径，None 表示相对于 output_dir）
     """
+    try:
+        output_path = validate_output_path(output_dir)
+    except ValueError as e:
+        print(f"输出路径校验失败: {e}")
+        return
+    if img_output_dir is not None:
+        try:
+            img_output_dir = validate_output_path(img_output_dir, '图片目录')
+        except ValueError as e:
+            print(f"图片目录校验失败: {e}")
+            return
+
     headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
     }
+
+    try:
+        validate_url(url, for_article=True)
+    except ValueError as e:
+        print(f"URL 校验失败: {e}")
+        return
 
     print(f"正在请求: {url}")
     try:
@@ -343,17 +456,16 @@ def fetch_wechat_article(url, output_dir='.', download_images=True, obsidian_mod
         print("未找到文章内容")
         return
 
-    # 创建输出目录
-    output_path = Path(output_dir)
+    # 创建输出目录（output_path 已在入口校验）
     output_path.mkdir(parents=True, exist_ok=True)
 
     # 创建图片目录
     img_dir = None
     article_id = None
     if download_images:
-        if img_output_dir:
-            # 使用指定的绝对路径作为图片目录
-            img_dir = Path(img_output_dir)
+        if img_output_dir is not None:
+            # 使用指定的绝对路径作为图片目录（已在入口校验）
+            img_dir = img_output_dir
             img_dir.mkdir(parents=True, exist_ok=True)
             print(f"创建图片目录: {img_dir.absolute()}/")
         elif obsidian_mode:
